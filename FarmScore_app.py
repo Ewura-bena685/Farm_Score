@@ -35,7 +35,7 @@ st.set_page_config(
 
 PALETTE = {
     "primary": "#0F6E56",
-    "accent": "#1D9E75",
+    "accent": "#63F5C7",
     "info": "#3B8BD4",
     "warning": "#B87817",
     "danger": "#D94F3A",
@@ -269,6 +269,28 @@ ALL_FEATURES = [
     'credit_signals', 'income_per_member',
     'region_enc', 'crop_enc'
 ]
+
+# Preset example profiles for quick comparison / what-if
+PRESETS = {
+    "Typical farmer": {
+        'region': 'Ashanti', 'crop': 'Maize', 'farm_size': 2.5,
+        'has_secondary': True, 'experience': 8, 'education': 1,
+        'household_size': 5, 'mobile_money': True, 'market_access': True,
+        'irrigation': False, 'prev_loan': False, 'loan_amount': 800,
+    },
+    "Low-risk farmer": {
+        'region': 'Greater Accra', 'crop': 'Cassava', 'farm_size': 6.0,
+        'has_secondary': True, 'experience': 20, 'education': 3,
+        'household_size': 4, 'mobile_money': True, 'market_access': True,
+        'irrigation': True, 'prev_loan': True, 'loan_amount': 1200,
+    },
+    "High-risk farmer": {
+        'region': 'Upper East', 'crop': 'Rice', 'farm_size': 0.6,
+        'has_secondary': False, 'experience': 3, 'education': 0,
+        'household_size': 9, 'mobile_money': False, 'market_access': False,
+        'irrigation': False, 'prev_loan': False, 'loan_amount': 400,
+    }
+}
 
 
 @st.cache_resource(show_spinner="Training FarmScore model on 5,000 Ghana farmers…")
@@ -537,6 +559,32 @@ with st.spinner("Preparing your FarmScore profile..."):
     raw_score = int(300 + proba * 550)
     rating, rating_color, decision = score_to_label(raw_score)
 
+    # --- Quick compare-to preset (what-if) ---
+    compare_choice = st.selectbox("Compare to preset", ["None"] + list(PRESETS.keys()), index=0)
+    baseline_info = None
+    if compare_choice and compare_choice != "None":
+        p = PRESETS[compare_choice]
+        base_feats = compute_features(
+            p['farm_size'], p['experience'], p['household_size'], p['mobile_money'],
+            p['market_access'], p['irrigation'], p['education'], p['prev_loan'],
+            p['has_secondary'], p['region'], p['crop'], p['loan_amount']
+        )
+        base_region_enc = le_region.transform([p['region']])[0]
+        base_crop_enc = le_crop.transform([p['crop']])[0]
+        base_row = pd.DataFrame([{
+            **{k: v for k, v in base_feats.items() if k != 'est_income'},
+            'region_enc': base_region_enc, 'crop_enc': base_crop_enc
+        }])[ALL_FEATURES]
+        base_proba = model.predict_proba(base_row)[0][1]
+        base_score = int(300 + base_proba * 550)
+        baseline_info = {
+            'name': compare_choice,
+            'score': base_score,
+            'proba': base_proba,
+            'feats': base_feats,
+            'region': p['region'], 'crop': p['crop']
+        }
+
 # ---- Two main columns ----
 left_col, right_col = st.columns([1, 1.6], gap="large")
 
@@ -589,6 +637,28 @@ with left_col:
         st.error(f"{decision}  —  Estimated score: **{proba:.0%}**")
     st.caption("This is a decision-support signal for institutional review and not a final approval.")
 
+    # --- Validation and guardrails: basic input sanity checks ---
+    validation_msgs = []
+    try:
+        est_income = feats.get('est_income', None)
+        if est_income is not None:
+            if loan_amount > max(2000, est_income * 1.5):
+                validation_msgs.append(("warning", f"Requested loan (${loan_amount:,}) is high relative to estimated income (${est_income:,.0f}). Consider reviewing the amount."))
+            if feats.get('income_to_loan_ratio', 999) < 0.5:
+                validation_msgs.append(("warning", f"Low income-to-loan ratio ({feats['income_to_loan_ratio']:.2f}) — loan may be large for expected income."))
+        if farm_size < 0.5 and loan_amount > 3000:
+            validation_msgs.append(("warning", "Small farm with a very large loan request — verify collateral and purpose."))
+        if not mobile_money and not market_access:
+            validation_msgs.append(("info", "No mobile money and limited market access — verified signals may be lower."))
+    except Exception:
+        validation_msgs.append(("info", "Validation checks unavailable."))
+
+    for lvl, msg in validation_msgs:
+        if lvl == 'warning':
+            st.warning(msg)
+        else:
+            st.info(msg)
+
     st.markdown("---")
     st.markdown('<div class="section-title">Farmer Record Summary</div>', unsafe_allow_html=True)
 
@@ -630,6 +700,8 @@ with left_col:
         mime="application/json",
         use_container_width=True,
     )
+
+# The full-width download report will include SHAP highlights — prepare later once shap_df is available
 
 
 with right_col:
@@ -677,6 +749,20 @@ with right_col:
         lambda x: f"+{x:.3f}" if x > 0 else f"{x:.3f}"
     )
 
+    # --- Plain-language explanation (concise summary for non-technical users) ---
+    try:
+        top_pos = shap_df.sort_values('shap_value', ascending=False).head(3)
+        top_neg = shap_df.sort_values('shap_value').head(3)
+        pos_list = [f"{r['feature']} (+{r['shap_value']:.3f})" for _, r in top_pos.iterrows()]
+        neg_list = [f"{r['feature']} ({r['shap_value']:.3f})" for _, r in top_neg.iterrows()]
+        plain_text = (
+            f"Top positive drivers: {', '.join(pos_list)}. "
+            f"Top negative drivers: {', '.join(neg_list)}."
+        )
+    except Exception:
+        plain_text = "A plain-language summary is unavailable for this profile."
+
+
     fig_shap = go.Figure(go.Bar(
         x=shap_df['shap_value'],
         y=shap_df['feature'],
@@ -697,9 +783,84 @@ with right_col:
         xaxis=dict(gridcolor='rgba(0,0,0,0.05)'),
     )
     st.plotly_chart(fig_shap, use_container_width=True)
-
     st.caption("Green bars **increase** the score  ·  Red bars **decrease** the score  ·  "
                "Bar length shows how much impact that factor had")
+
+    # Show plain-language explanation under SHAP chart
+    st.markdown(f"<div style='margin-top:.55rem; padding:.6rem; border-radius:10px; background:var(--surface);'>"
+                f"<strong>Summary:</strong> {plain_text}</div>", unsafe_allow_html=True)
+
+    # --- If baseline_info exists (compare-to preset), compute baseline SHAP and show a what-changed panel ---
+    if baseline_info is not None:
+        try:
+            shap_vals_base = explainer.shap_values(base_row)
+            if isinstance(shap_vals_base, list):
+                sv_base = shap_vals_base[1][0] if len(shap_vals_base) > 1 else shap_vals_base[0][0]
+            else:
+                shap_array_base = np.asarray(shap_vals_base)
+                if shap_array_base.ndim == 3:
+                    sv_base = shap_array_base[0, :, 1] if shap_array_base.shape[2] > 1 else shap_array_base[0, :, 0]
+                elif shap_array_base.ndim == 2:
+                    sv_base = shap_array_base[0]
+                else:
+                    sv_base = shap_array_base.flatten()
+        except Exception:
+            sv_base = np.zeros_like(sv)
+
+        # compare shap contributions
+        comp_df = pd.DataFrame({
+            'feature': feature_labels,
+            'base_shap': sv_base,
+            'curr_shap': sv,
+        })
+        comp_df['delta'] = comp_df['curr_shap'] - comp_df['base_shap']
+        comp_df['abs_delta'] = comp_df['delta'].abs()
+        top_comp = comp_df.sort_values('abs_delta', ascending=False).head(5)
+
+        # Plain-language summary
+        score_diff = raw_score - baseline_info['score']
+        summary_lines = [f"Compared to **{baseline_info['name']}** this farmer scores **{score_diff:+d}** points."]
+        for _, r in top_comp.iterrows():
+            sign = '+' if r['delta'] > 0 else ''
+            summary_lines.append(f"{r['feature']}: {sign}{r['delta']:.3f} (from {r['base_shap']:.3f} to {r['curr_shap']:.3f})")
+
+        summary_html = "<br>".join(summary_lines)
+
+        # Render the what-changed panel
+        st.markdown(f"""
+        <div class="metric-card">
+            <div style='display:flex; justify-content:space-between; align-items:center'>
+                <div style='max-width:78%'>
+                    <div style='font-weight:800; color:var(--primary);'>What changed vs {baseline_info['name']}</div>
+                    <div style='color:var(--muted); margin-top:4px'>{summary_html}</div>
+                </div>
+                <div style='text-align:right'>
+                    <div style='font-weight:800; font-size:1.2rem'>{baseline_info['score']} → {raw_score}</div>
+                    <div style='color:var(--muted); font-size:0.85rem'>({baseline_info['name']} → current)</div>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # table of top differences
+        rows_html = "".join([
+            f"<tr><td style='padding:6px 10px'>{r['feature']}</td>"
+            f"<td style='padding:6px 10px; color: {'#1D9E75' if r['curr_shap']>0 else '#D94F3A'}'>{r['curr_shap']:.3f}</td>"
+            f"<td style='padding:6px 10px'>{r['base_shap']:.3f}</td>"
+            f"<td style='padding:6px 10px'>{r['delta']:+.3f}</td></tr>"
+            for _, r in top_comp.iterrows()
+        ])
+
+        st.markdown(f"""
+        <div style='margin-top:.5rem'>
+            <table style='border-collapse:collapse; width:100%'>
+                <thead><tr style='text-align:left; color:var(--muted)'><th>Feature</th><th>Current impact</th><th>Preset impact</th><th>Δ</th></tr></thead>
+                <tbody>
+                    {rows_html}
+                </tbody>
+            </table>
+        </div>
+        """, unsafe_allow_html=True)
 
     # Peer comparison
     st.markdown("---")
@@ -740,6 +901,47 @@ with right_col:
     )
     st.plotly_chart(fig_dist, use_container_width=True)
     st.caption(f"This farmer scores better than **{percentile:.0f}%** of {region} farmers in our dataset.")
+
+# === Build downloadable HTML report (includes SHAP highlights) ===
+try:
+    top_shap = shap_df.sort_values('abs_shap', ascending=False).head(6)
+    shap_rows_html = "".join([
+        f"<tr><td>{r['feature']}</td><td style='color:{r['color']}'>{r['label']}</td></tr>"
+        for _, r in top_shap.iterrows()
+    ])
+except Exception:
+    shap_rows_html = ""
+
+report_html = f"""
+<html><head><meta charset='utf-8'><title>FarmScore report - {region}</title></head><body style='font-family: {FONT_FAMILY}; color: {PALETTE['text']}'>
+<h2>FarmScore report — {region} / {crop}</h2>
+<p><strong>Score:</strong> {raw_score} &nbsp; <strong>Tier:</strong> {rating}</p>
+<h3>Farmer profile</h3>
+<ul>
+  <li>Farm size: {farm_size} ha</li>
+  <li>Years experience: {experience}</li>
+  <li>Education level: {['None','Primary','JHS/Middle','SHS/Higher'][education]}</li>
+  <li>Household size: {household_size}</li>
+  <li>Primary crop: {crop}</li>
+  <li>Estimated income: ${feats['est_income']:,.0f} USD</li>
+</ul>
+<h3>Top contributing factors (SHAP)</h3>
+<table border='0' cellpadding='6' style='border-collapse:collapse'>
+<thead><tr><th align='left'>Feature</th><th align='left'>Impact</th></tr></thead>
+<tbody>
+{shap_rows_html}
+</tbody></table>
+<p style='margin-top:1rem; color: #666'>This report is a decision-support artifact. Not a credit approval. FarmScore is a prototype for demonstration.</p>
+</body></html>
+"""
+
+st.download_button(
+    "⬇️ Download HTML report",
+    data=report_html,
+    file_name=f"farmscore_report_{region.lower().replace(' ', '_')}.html",
+    mime="text/html",
+    use_container_width=True,
+)
 
 
 # ============================================================
