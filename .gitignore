@@ -1,0 +1,43 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Streamlit / local secrets
+.streamlit/secrets.toml
+.streamlit/*.json
+
+# Data and large local artifacts
+*.csv
+*.parquet
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.onnx
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# VS Code settings
+.vscode/
+
+# Logs and temp files
+*.log
+*.tmp
+*.bak
+
+# Test / coverage outputs
+.pytest_cache/
+.coverage
+htmlcov/
