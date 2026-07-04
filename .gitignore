@@ -18,6 +18,8 @@ ENV/
 
 # Data and large local artifacts
 *.csv
+!farmscore-ghana/data/raw/ghana_crop_production.csv
+!farmscore-ghana/data/raw/ghana_farmer_profiles.csv
 *.parquet
 *.pkl
 *.joblib
